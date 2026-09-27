@@ -1,0 +1,14 @@
+openai
+google-cloud-texttospeech
+SpeechRecognition
+PyAudio
+pygame
+opencv-python
+tensorflow
+keras
+torch
+torchvision
+face_recognition
+pytesseract
+numpy
+Pillow

@@ -1,0 +1,12 @@
+.venv/
+venv/
+Location/
+.idea/
+__pycache__/
+*.pyc
+.env
+*.h5
+captured_image_*.jpg
+face_detection_image_*.jpg
+known_faces/**/*.jpg
+known_faces/**/*.png
