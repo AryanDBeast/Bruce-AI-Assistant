@@ -4,7 +4,6 @@ import os
 from openai import OpenAI
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 from google.cloud import texttospeech
-import os
 import pygame
 import cv2
 from keras.applications import MobileNetV2
@@ -39,7 +38,10 @@ model.eval()  # Set the model to evaluation mode
 stop_speaking = False
 stop_thread = None
 long_length = False
-usable_mic = 2 #1-Logitech Headphones, 2-PNP Mic, 4 - Airpods
+usable_mic = int(os.environ.get("BRUCE_MIC_INDEX", 2))  # run Mics.py to find your index
+
+# Name Bruce greets after a successful face match
+AUTHORIZED_USER = os.environ.get("BRUCE_USER", "User")
 
 # Trivia Question List
 trivia_questions = [
@@ -249,6 +251,8 @@ def load_known_faces(known_faces_dir):
         if os.path.isdir(person_dir):
             # Load each image file in the person's directory
             for img_file in os.listdir(person_dir):
+                if not img_file.lower().endswith((".jpg", ".jpeg", ".png")):
+                    continue
                 img_path = os.path.join(person_dir, img_file)
                 image = face_recognition.load_image_file(img_path)
                 encoding = face_recognition.face_encodings(image)
@@ -633,8 +637,8 @@ def ask_trivia():
 
 def capture_and_recognize_faces(known_encodings):
     """Capture an image from the webcam and recognize faces in it."""
-    print("Hello, my name is Bruce and before we get started I must make sure you are Aryan")
-    audio_stream = text_to_speech("Hello, my name is Bruce and before we get started I must make sure you are Aryan")
+    print(f"Hello, my name is Bruce and before we get started I must make sure you are {AUTHORIZED_USER}")
+    audio_stream = text_to_speech(f"Hello, my name is Bruce and before we get started I must make sure you are {AUTHORIZED_USER}")
     play_audio(audio_stream)
 
     # Initialize webcam
@@ -671,7 +675,7 @@ def capture_and_recognize_faces(known_encodings):
         face_distances = face_recognition.face_distance(known_encodings, face_encoding)
         best_match_index = np.argmin(face_distances)
         if matches[best_match_index]:
-            faces_detected.append("Aryan")
+            faces_detected.append(AUTHORIZED_USER)
         else:
             faces_detected.append("Unknown Face")
     return faces_detected
@@ -727,9 +731,9 @@ def main():
        audio_stream = text_to_speech("No face detected, ending program...")
        play_audio(audio_stream)
    else:
-       if "Aryan" in faces_detected:
-           print("Welcome Aryan, how can I help?")
-           audio = text_to_speech("Welcome Aryan, how can I help?")
+       if AUTHORIZED_USER in faces_detected:
+           print(f"Welcome {AUTHORIZED_USER}, how can I help?")
+           audio = text_to_speech(f"Welcome {AUTHORIZED_USER}, how can I help?")
            play_audio(audio)
            while True:
                stop_speaking = False
@@ -768,8 +772,8 @@ def main():
                    else:
                        print("Keyword 'Bruce' not found. No response generated.")
        else:
-           print("You are not Aryan, ending program...")
-           audio_stream = text_to_speech("You are not Aryan, ending program...")
+           print(f"You are not {AUTHORIZED_USER}, ending program...")
+           audio_stream = text_to_speech(f"You are not {AUTHORIZED_USER}, ending program...")
            play_audio(audio_stream)
 
 if __name__ == "__main__":
