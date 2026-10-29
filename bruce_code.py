@@ -1,3 +1,7 @@
+# Bruce: a voice assistant with face-ID login and webcam vision skills.
+# Say "Bruce" plus a command; anything that isn't a command goes to OpenAI.
+# Setup and the full command list are in README.md.
+
 import io
 import speech_recognition as sr
 import os
@@ -20,21 +24,23 @@ import face_recognition
 import threading
 import pytesseract
 
+# Windows default install path; change this on macOS/Linux
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-# Initialize pygame for audio playback
+# pygame plays the MP3 audio that Google TTS returns
 pygame.mixer.init()
 
 
-# Load the MobileNetV2 model pre-trained on ImageNet
+# Vision models load once at startup (slow), then get reused for every command.
+# MobileNetV2 (ImageNet): names the main object in view
 modelMNV2 = MobileNetV2(weights='imagenet')
 
 
-# Load the pre-trained Faster R-CNN model from torchvision
+# Faster R-CNN (COCO): finds and boxes multiple objects
 model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
-model.eval()  # Set the model to evaluation mode
+model.eval()  # inference only, no training
 
-# Global flag for stopping speech
+# Shared state for interrupting long answers (see listen_for_stop_command)
 stop_speaking = False
 stop_thread = None
 long_length = False
@@ -43,7 +49,7 @@ usable_mic = int(os.environ.get("BRUCE_MIC_INDEX", 2))  # run Mics.py to find yo
 # Name Bruce greets after a successful face match
 AUTHORIZED_USER = os.environ.get("BRUCE_USER", "User")
 
-# Trivia Question List
+# Questions for the "trivia time" command
 trivia_questions = [
     {"question": "What is the smallest planet in our solar system?", "answer": "Mercury"},
     {"question": "Who painted the Mona Lisa?", "answer": "Leonardo da Vinci"},
@@ -224,7 +230,7 @@ trivia_questions = [
     {"question": "Which planet is known for its rings?", "answer": "Saturn"}
 ]
 
-# COCO dataset class labels
+# Label names for Faster R-CNN output, indexed by class id
 COCO_INSTANCE_CATEGORY_NAMES = [
    '__background__', 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
    'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'N/A', 'stop sign',
@@ -245,11 +251,11 @@ def load_known_faces(known_faces_dir):
     known_encodings = []
     known_names = []
 
-    # Iterate over each person in the known_faces directory
+    # One folder per person, each holding reference photos
     for person_name in os.listdir(known_faces_dir):
         person_dir = os.path.join(known_faces_dir, person_name)
         if os.path.isdir(person_dir):
-            # Load each image file in the person's directory
+            # Encode every photo in the folder, skipping non-images like .gitkeep
             for img_file in os.listdir(person_dir):
                 if not img_file.lower().endswith((".jpg", ".jpeg", ".png")):
                     continue
@@ -263,15 +269,15 @@ def load_known_faces(known_faces_dir):
     return known_encodings
 
 def get_openai_response(prompt):
-   """Get a response from OpenAI GPT-4 API using the chat completion endpoint."""
-   response = client.chat.completions.create(model="gpt-4o-mini-2024-07-18",  # or "gpt-3.5-turbo"
+   """Send the question to OpenAI and return the answer text."""
+   response = client.chat.completions.create(model="gpt-4o-mini-2024-07-18",  # small, fast model keeps replies quick
    messages=[
        {"role": "user", "content": prompt}
    ])
    return response.choices[0].message.content.strip()
 
 def text_to_speech(text):
-   """Convert text to speech using Google Cloud Text-to-Speech API."""
+   """Turn text into MP3 audio with Google Cloud TTS. Returns None on error."""
    client = texttospeech.TextToSpeechClient()
 
 
@@ -290,7 +296,6 @@ def text_to_speech(text):
        )
 
 
-       # Use io.BytesIO to handle audio data in memory
        audio_stream = io.BytesIO(response.audio_content)
 
 
@@ -302,28 +307,26 @@ def text_to_speech(text):
        return None
 
 def play_audio(audio_stream):
-   """Play audio from an in-memory stream using pygame."""
+   """Play TTS audio. For long answers, also listen for 'stop' in the background."""
    global stop_speaking
    global stop_thread
    global long_length
 
-   # Reset the stream position to the beginning
    audio_stream.seek(0)
 
-   # Load the audio stream into pygame mixer
    pygame.mixer.music.load(audio_stream)
    pygame.mixer.music.play()
    if long_length == True:
        stop_thread = threading.Thread(target=listen_for_stop_command)
        stop_thread.start()
 
-   # Wait while the audio is playing
+   # Block until playback ends or the user says stop
    while pygame.mixer.music.get_busy() and not stop_speaking:
        pygame.time.Clock().tick(10)
 
 
 def listen_to_microphone():
-   """Listen to audio from the selected microphone and convert it to text."""
+   """Record one phrase from the mic and return it as text (None if not understood)."""
    global usable_mic
    recognizer = sr.Recognizer()
    mic = sr.Microphone(usable_mic)
@@ -346,7 +349,7 @@ def listen_to_microphone():
        return None
 
 def listen_for_stop_command():
-    """Listen for 'Bruce, stop' command and set the stop_speaking flag."""
+    """Runs while Bruce is talking. Cuts playback if the user says 'stop' or 'shut up'."""
     global stop_speaking
     global usable_mic
     print("Say stop for dictation to end")
@@ -374,7 +377,6 @@ def listen_for_stop_command():
 
 def capture_and_display_image():
    """Capture an image from the webcam and display it."""
-   # Open a connection to the webcam
    cap = cv2.VideoCapture(0)  # 0 is the default webcam
 
 
@@ -383,28 +385,25 @@ def capture_and_display_image():
        return
 
 
-   # Capture a single frame
    ret, frame = cap.read()
    if not ret:
        print("Failed to capture image.")
        return
 
-   # Release the webcam
    cap.release()
 
-   # Create a unique filename using the current timestamp
+   # Timestamped filename so photos don't overwrite each other
    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
    filename = f"captured_image_{timestamp}.jpg"
 
 
-   # Save the captured image
    cv2.imwrite(filename, frame)
    print(f"Image saved as {filename}")
    audio_stream = text_to_speech("Image Captured")
    play_audio(audio_stream)
 
 
-   # Display the captured image
+   # Show the photo until a key is pressed
    cv2.imshow('Captured Image', frame)
    cv2.waitKey(0)
    cv2.destroyAllWindows()
@@ -412,7 +411,6 @@ def capture_and_display_image():
 
 def detect_faces_and_display():
    """Capture an image, detect faces, and display it with face boxes."""
-   # Open a connection to the webcam
    cap = cv2.VideoCapture(0)  # 0 is the default webcam
 
 
@@ -421,28 +419,23 @@ def detect_faces_and_display():
        return
 
 
-   # Capture a single frame
    ret, frame = cap.read()
    if not ret:
        print("Failed to capture image.")
        return
 
-   # Release the webcam
    cap.release()
 
-   # Convert the image to grayscale
    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
 
-   # Load OpenCV's pre-trained Haar Cascade classifier for face detection
+   # Haar cascade: fast, classic face detector that ships with OpenCV
    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 
-   # Perform face detection
    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
 
-   # prints faces detected
    print(f"Number of faces detected: {len(faces)}")
 
 
@@ -451,28 +444,26 @@ def detect_faces_and_display():
        cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 0), 2)
 
 
-   # Create a unique filename using the current timestamp
+   # Timestamped filename so photos don't overwrite each other
    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
    filename = f"face_detection_image_{timestamp}.jpg"
 
 
-   # Save the captured image
    cv2.imwrite(filename, frame)
    print(f"Analyzed image saved as {filename}")
 
-    # Information
+    # Say the result out loud
    audio_stream = text_to_speech(f"Sir, {len(faces)} faces has been detected")
    play_audio(audio_stream)
 
 
-   # Display the image with detected faces
+   # Show the result until a key is pressed
    cv2.imshow('Detected Faces', frame)
    cv2.waitKey(0)
    cv2.destroyAllWindows()
 
 def capture_and_analyze_object():
-   """Capture an image from the webcam and analyze it using TensorFlow MobileNetV3."""
-   # Initialize the webcam
+   """Take a photo and name the main object in it with MobileNetV2."""
    cap = cv2.VideoCapture(0)
 
 
@@ -481,7 +472,6 @@ def capture_and_analyze_object():
        return
 
 
-   # Capture a single frame
    ret, frame = cap.read()
 
 
@@ -491,11 +481,10 @@ def capture_and_analyze_object():
        return
 
 
-   # Release the webcam
    cap.release()
 
 
-   # Load the MobileNetV3-Large model
+   # MobileNetV2 expects a 224x224 input
    img = cv2.resize(frame, (224, 224))
 
 
@@ -505,30 +494,29 @@ def capture_and_analyze_object():
    x = preprocess_input(x)
 
 
-   # Get the predictions from the model
    preds = modelMNV2.predict(x)
 
 
-   # Print the decoded predictions
+   # Top 3 guesses, best first
    decoded_preds = decode_predictions(preds, top=3)[0]
    print('Predicted:', decoded_preds)
 
 
-   # Draw a bounding box and label on the original frame (not resized)
+   # Label the full-size frame with the top guess
    label = decoded_preds[0][1]  # Take the first predicted label
    confidence = decoded_preds[0][2] * 100  # Confidence in percentage
 
 
-   # Draw a bounding box around the entire frame to simulate object detection
+   # MobileNet classifies but doesn't locate objects, so the box is the whole frame
    height, width, _ = frame.shape
    cv2.rectangle(frame, (0, 0), (width, height), (0, 255, 0), 2)
    cv2.putText(frame, f"{label} ({confidence:.2f}%)", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-    # Information
+    # Say the result out loud
    audio_stream = text_to_speech(f"Sir, the detected object is {label} with a {confidence:.2f}% confidence")
    play_audio(audio_stream)
 
-   # Display the image with the drawn bounding box and label
+   # Show the result until a key is pressed
    cv2.imshow("Item", frame)
    cv2.waitKey(0)
    cv2.destroyAllWindows()
@@ -543,7 +531,7 @@ def preprocess_image(image):
 
 
 def draw_bounding_boxes(image, outputs, threshold=0.5):
-   """Draw bounding boxes and labels on the image."""
+   """Box and label every detection above the threshold, then say what was found."""
    boxes = outputs['boxes'].detach().cpu().numpy()
    scores = outputs['scores'].detach().cpu().numpy()
    labels = outputs['labels'].detach().cpu().numpy()
@@ -558,7 +546,7 @@ def draw_bounding_boxes(image, outputs, threshold=0.5):
            cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
            cv2.putText(image, label, (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
 
-    # Information
+    # Say the result out loud
    if label_names:
        audio_stream = text_to_speech(f"Sir, {label_names} detected")
        play_audio(audio_stream)
@@ -570,9 +558,7 @@ def draw_bounding_boxes(image, outputs, threshold=0.5):
 
 
 def detect_objects_and_display():
-   """Capture image, detect objects, and display results."""
-   # Capture image from webcam
-   # Initialize the webcam
+   """Take a photo and detect every object in it with Faster R-CNN."""
    cap = cv2.VideoCapture(0)
 
 
@@ -581,7 +567,6 @@ def detect_objects_and_display():
        return
 
 
-   # Capture a single frame
    ret, frame = cap.read()
 
 
@@ -591,7 +576,6 @@ def detect_objects_and_display():
        return
 
 
-   # Release the webcam
    cap.release()
 
 
@@ -599,7 +583,7 @@ def detect_objects_and_display():
    input_tensor = preprocess_image(frame)
 
 
-   # Perform object detection
+   # no_grad: inference only, saves memory
    with torch.no_grad():
        outputs = model(input_tensor)[0]
 
@@ -608,7 +592,7 @@ def detect_objects_and_display():
    image_with_boxes = draw_bounding_boxes(frame, outputs)
 
 
-   # Display the image with detections
+   # Show the result until a key is pressed
    cv2.imshow("Object Detection", image_with_boxes)
 
    cv2.waitKey(0)
@@ -636,19 +620,17 @@ def ask_trivia():
 
 
 def capture_and_recognize_faces(known_encodings):
-    """Capture an image from the webcam and recognize faces in it."""
+    """Face-ID login: take a photo and compare it to the faces in known_faces/."""
     print(f"Hello, my name is Bruce and before we get started I must make sure you are {AUTHORIZED_USER}")
     audio_stream = text_to_speech(f"Hello, my name is Bruce and before we get started I must make sure you are {AUTHORIZED_USER}")
     play_audio(audio_stream)
 
-    # Initialize webcam
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("Error: Could not access the webcam.")
         return
 
-    # Capture a single frame
     ret, frame = cap.read()
 
     if not ret:
@@ -656,22 +638,20 @@ def capture_and_recognize_faces(known_encodings):
         cap.release()
         return
 
-    # Convert the image from BGR to RGB
+    # OpenCV gives BGR, face_recognition expects RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # List for faces
     faces_detected = []
 
     # Find all face locations and encodings in the current frame
     face_locations = face_recognition.face_locations(rgb_frame)
     face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
-    # Loop through each detected face
     for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
         # See if the face is a match for the known face(s)
         matches = face_recognition.compare_faces(known_encodings, face_encoding)
 
-        # Use the known face with the smallest distance to the new face
+        # Take the closest known face, and only accept it if it's also a match
         face_distances = face_recognition.face_distance(known_encodings, face_encoding)
         best_match_index = np.argmin(face_distances)
         if matches[best_match_index]:
@@ -680,15 +660,13 @@ def capture_and_recognize_faces(known_encodings):
             faces_detected.append("Unknown Face")
     return faces_detected
 def capture_image_and_perform_ocr():
-    # Initialize the webcam
-    # Initialize the webcam
+    """Take a photo and read any printed text in it out loud (Tesseract OCR)."""
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("Error: Could not access the webcam.")
         return
 
-    # Capture a single frame
     ret, frame = cap.read()
 
     if not ret:
@@ -696,16 +674,14 @@ def capture_image_and_perform_ocr():
         cap.release()
         return
 
-    # Release the webcam
     cap.release()
 
-    # Convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Apply thresholding
+    # Black-and-white threshold makes printed text easier for Tesseract
     _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
 
-    # Perform OCR on the captured image
+    # --psm 6: treat the image as a single block of text
     text = pytesseract.image_to_string(thresh, lang='eng', config='--psm 6')
     if text == "":
         print("No text detected")
@@ -717,7 +693,7 @@ def capture_image_and_perform_ocr():
         play_audio(audio_stream)
 
 def main():
-   """Main function to run the speech-to-text, OpenAI response, and text-to-speech."""
+   """Face-ID check, then loop: listen, run a skill or ask OpenAI, speak the answer."""
    global stop_speaking
    global long_length
    print("Hello, loading packages...")
@@ -741,6 +717,7 @@ def main():
                user_input = listen_to_microphone()
                if user_input:
                    ai_user_input = user_input.replace("Bruce", "")
+                   # Only respond when the wake word "Bruce" is in the phrase
                    if "Bruce" in user_input:
                        if "capture image" in user_input or "take a picture" in user_input:
                            print("Capturing image from webcam...")
@@ -761,10 +738,12 @@ def main():
                            capture_image_and_perform_ocr()
                        else:
                            response_text = get_openai_response(ai_user_input)
+                           # Strip Markdown symbols so TTS doesn't read them aloud
                            response_textv1 = response_text.replace("#", "")
                            new_response_text = response_textv1.replace("*", "")
                            print(f"OpenAI Response: {new_response_text}")
                            audio_stream = text_to_speech(new_response_text)
+                           # Long answers can be interrupted by saying "stop"
                            if len(new_response_text) > 75:
                                long_length = True
                            play_audio(audio_stream)
